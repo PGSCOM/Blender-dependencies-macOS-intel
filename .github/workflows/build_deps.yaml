@@ -24,6 +24,7 @@ jobs:
         rm -rf blender
         git clone https://projects.blender.org/blender/blender.git blender
         cd blender
+        git checkout ios
         git submodule update --init --recursive
 
     - name: Install dependencies
