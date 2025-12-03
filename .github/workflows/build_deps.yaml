@@ -1,83 +1,112 @@
-name: Build Blender Intel Dependencies
-
-permissions:
-  contents: write
+name: Build Blender Libraries macOS Intel
 
 on:
-  workflow_dispatch: # Se activa manualmente para no saturar tus minutos
-    inputs:
-      blender_ref:
-        description: 'Rama o tag de Blender a compilar'
-        required: true
-        default: 'ios'
+  workflow_dispatch:
 
 jobs:
-  compile-deps:
-    # IMPORTANTE: macos-13 es Intel (x86_64).
-    # macos-14 es Apple Silicon (ARM64) y no sirve para lo que necesitas.
-    runs-on: macos-13 
+  build-macos-intel-libs:
+    runs-on: macos-13  # macOS Intel runner
+    permissions:
+      contents: write
     
     steps:
-      - name: Checkout Blender
-        uses: actions/checkout@v4
-        with:
-          repository: blender/blender
-          ref: ${{ inputs.blender_ref }}
-          path: blender # Clonamos en subcarpeta para mantener estructura ../lib
-          submodules: false
+    - name: Checkout Blender source
+      uses: actions/checkout@v4
+      with:
+        repository: 'blender/blender'
+        ref: 'main'
+        submodules: 'recursive'
+        fetch-depth: 0
 
-      - name: Install Build Tools
-        run: |
-          brew update
-          brew install cmake subversion git-lfs bison flex
-          git lfs install
+    - name: Clone Blender from official repository
+      run: |
+        cd ..
+        rm -rf blender
+        git clone https://projects.blender.org/blender/blender.git blender
+        cd blender
+        git submodule update --init --recursive
 
-      - name: Restore Cache (Opcional pero recomendado)
-        id: cache-deps
-        uses: actions/cache@v4
-        with:
-          path: lib/macos_x86_64
-          # La clave se basa en el script de instalación. Si cambia, recompila.
-          key: blender-deps-intel-${{ hashFiles('blender/build_files/build_environment/install_deps.sh') }}
+    - name: Install dependencies
+      run: |
+        brew install cmake ninja subversion
+        
+    - name: Setup directory structure
+      run: |
+        cd ..
+        mkdir -p lib
+        
+    - name: Download precompiled libraries via SVN
+      run: |
+        cd ..
+        svn checkout https://svn.blender.org/svnroot/bf-blender/trunk/lib/darwin lib/darwin
+      continue-on-error: false
 
-      - name: Compile Dependencies (make deps)
-        if: steps.cache-deps.outputs.cache-hit != 'true'
-        working-directory: blender
-        # 'make deps' descarga fuentes y compila todo en ../lib/macos_x86_64
-        # FORCE_BUILD=1 asegura que no intente descargar binarios inexistentes
-        run: |
-          make deps \
-            BUILD_CMAKE_ARGS="-DOUROBOROS_NETWORK=OFF"
+    - name: Verify libraries download
+      run: |
+        if [ -d "../lib/darwin" ]; then
+          echo "Libraries downloaded successfully"
+          ls -la ../lib/darwin
+        else
+          echo "Error: Libraries not found"
+          exit 1
+        fi
 
-      - name: Verify Output
-        run: |
-          echo "Verificando existencia de librerías..."
-          ls -la lib/macos_x86_64/
-          echo "Verificando Python..."
-          ls -la lib/macos_x86_64/python/bin/python*
+    - name: Configure CMake
+      run: |
+        cd ../blender
+        mkdir -p build
+        cd build
+        cmake .. \
+          -G Ninja \
+          -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLIBDIR=${{ github.workspace }}/../lib/darwin
 
-      - name: Compress Dependencies
-        run: tar -czf blender_intel_deps.tar.gz lib/macos_x86_64
+    - name: Build libraries
+      run: |
+        cd ../blender/build
+        ninja
 
-      # 2. GESTIÓN DEL TAG: Borramos el tag anterior para moverlo al commit actual
-      # Esto asegura que la release "latest" contenga el código de HOY.
-      - name: Update Tag
-        uses: richardsimko/update-tag@v1
-        with:
-          tag_name: latest-deps
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Create release archive
+      run: |
+        cd ..
+        tar -czf blender-libs-darwin-intel.tar.gz lib/darwin/
+        
+    - name: Get current date
+      id: date
+      run: echo "date=$(date +'%Y-%m-%d_%H-%M-%S')" >> $GITHUB_OUTPUT
 
-      # 3. SUBIDA A RELEASE: Usamos el tag fijo
-      - name: Upload to Latest Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: latest-deps      # Siempre usa este nombre
-          name: "Librerías Blender Intel (Última versión)"
-          body: "Dependencias compiladas automáticamente. Sobrescrito el: $(date)"
-          files: blender_intel_deps.tar.gz
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Delete existing latest release
+      continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release delete latest --yes --repo ${{ github.repository }}
+        git push --delete origin latest || true
 
+    - name: Create latest release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release create latest \
+          ../blender-libs-darwin-intel.tar.gz \
+          --repo ${{ github.repository }} \
+          --title "Latest Blender macOS Intel Libraries" \
+          --notes "**Blender Libraries for macOS Intel (x86_64)**
+          
+          Compiled on: ${{ steps.date.outputs.date }}
+          
+          These are the precompiled libraries required to build Blender on macOS Intel architecture.
+          
+          ## Installation
+          \`\`\`bash
+          # Extract the archive
+          tar -xzf blender-libs-darwin-intel.tar.gz
+          
+          # Use with Blender build
+          cmake -DLIBDIR=\$PWD/lib/darwin ...
+          \`\`\`
+          
+          ---
+          Built from: https://projects.blender.org/blender/blender" \
+          --latest
