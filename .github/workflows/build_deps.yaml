@@ -36,10 +36,32 @@ jobs:
         cd ..
         mkdir -p lib
         
-    - name: Download precompiled libraries via SVN
+    - name: Download precompiled libraries via SVN with retries
       run: |
+        set -euo pipefail
         cd ..
-        svn checkout https://svn.blender.org/svnroot/bf-blender/trunk/lib/darwin lib/darwin
+        # ensure a clean start
+        rm -rf lib/darwin
+        max_attempts=6
+        attempt=1
+        backoff=15
+        while [ $attempt -le $max_attempts ]; do
+          echo "Attempt $attempt of $max_attempts: svn checkout..."
+          # Increase http timeout, run non-interactive and accept certs; be quiet to reduce logs
+          svn checkout --non-interactive --trust-server-cert --quiet --config-option servers:global:http-timeout=600 https://svn.blender.org/svnroot/bf-blender/trunk/lib/darwin lib/darwin && break
+          status=$?
+          echo "svn checkout failed with exit code $status."
+          if [ $attempt -lt $max_attempts ]; then
+            echo "Cleaning partial checkout and retrying in $backoff seconds..."
+            rm -rf lib/darwin
+            sleep $backoff
+            backoff=$((backoff * 2))
+          else
+            echo "Max attempts ($max_attempts) reached. Aborting."
+            exit 1
+          fi
+          attempt=$((attempt + 1))
+        done
       continue-on-error: false
 
     - name: Verify libraries download
